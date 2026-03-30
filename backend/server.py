@@ -16,6 +16,9 @@ import time
 import cloudinary
 import cloudinary.utils
 from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
+import socketio
+import asyncio
+from openai import AsyncOpenAI
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -35,6 +38,13 @@ cloudinary.config(
 
 # Stripe config
 stripe_api_key = os.environ.get('STRIPE_API_KEY')
+
+# OpenAI config for moderation
+openai_client = AsyncOpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
+
+# Socket.IO setup
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+socket_app = socketio.ASGIApp(sio)
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -118,6 +128,10 @@ class ModerationFlag(BaseModel):
 
 class CommentCreate(BaseModel):
     text: str
+    parent_id: Optional[str] = None  # For reply threading
+
+class CommentUpdate(BaseModel):
+    text: str
 
 class Comment(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -127,7 +141,11 @@ class Comment(BaseModel):
     username: str
     user_avatar: Optional[str]
     text: str
+    parent_id: Optional[str] = None
+    edited: bool = False
+    reply_count: int = 0
     created_at: str
+    updated_at: Optional[str] = None
 
 class Notification(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -183,6 +201,55 @@ async def create_notification(user_id: str, notification_type: str, message: str
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     await db.notifications.insert_one(notification_doc)
+    
+    # Emit real-time notification via WebSocket
+    await sio.emit('new_notification', notification_doc, room=user_id)
+
+async def moderate_content_ai(text: str, video_url: Optional[str] = None) -> Dict:
+    """AI-powered content moderation using OpenAI"""
+    try:
+        if not os.environ.get('OPENAI_API_KEY'):
+            return {"flagged": False, "categories": {}, "scores": {}}
+        
+        # Moderate text content
+        response = await openai_client.moderations.create(input=text)
+        result = response.results[0]
+        
+        return {
+            "flagged": result.flagged,
+            "categories": result.categories.model_dump(),
+            "category_scores": result.category_scores.model_dump()
+        }
+    except Exception as e:
+        logger.error(f"AI moderation error: {str(e)}")
+        return {"flagged": False, "categories": {}, "scores": {}}
+
+# ============= WEBSOCKET HANDLERS =============
+
+@sio.event
+async def connect(sid, environ):
+    logger.info(f"WebSocket client connected: {sid}")
+
+@sio.event
+async def disconnect(sid):
+    logger.info(f"WebSocket client disconnected: {sid}")
+
+@sio.event
+async def authenticate(sid, data):
+    """Authenticate user and join their personal room"""
+    try:
+        token = data.get('token')
+        if not token:
+            return
+        
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get('user_id')
+        
+        # Join user to their personal room for targeted notifications
+        await sio.enter_room(sid, user_id)
+        logger.info(f"User {user_id} authenticated on WebSocket")
+    except Exception as e:
+        logger.error(f"WebSocket auth error: {str(e)}")
 
 # ============= AUTH ROUTES =============
 
@@ -309,6 +376,25 @@ async def generate_cloudinary_signature(
 async def upload_video(video_data: VideoUpload, authorization: Optional[str] = Header(None)):
     user = await get_current_user(authorization)
     
+    # AI moderation check on title and description
+    moderation_text = f"{video_data.title} {video_data.description or ''}"
+    moderation_result = await moderate_content_ai(moderation_text)
+    
+    # Auto-flag if AI detects inappropriate content
+    status = "active"
+    if moderation_result.get("flagged"):
+        status = "under_review"
+        # Create moderation flag automatically
+        flag_doc = {
+            "id": str(uuid.uuid4()),
+            "video_id": str(uuid.uuid4()),  # Temporary, will update after video creation
+            "flagged_by": "system_ai",
+            "reason": f"AI-flagged: {', '.join([k for k, v in moderation_result.get('categories', {}).items() if v])}",
+            "status": "pending",
+            "ai_scores": moderation_result.get("category_scores", {}),
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+    
     video_id = str(uuid.uuid4())
     video_doc = {
         "id": video_id,
@@ -324,10 +410,23 @@ async def upload_video(video_data: VideoUpload, authorization: Optional[str] = H
         "validated_views": 0,
         "tips_received": 0.0,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "status": "active"
+        "status": status,
+        "moderation": moderation_result
     }
     
     await db.videos.insert_one(video_doc)
+    
+    # If flagged, create the flag and notify user
+    if status == "under_review":
+        flag_doc["video_id"] = video_id
+        await db.moderation_flags.insert_one(flag_doc)
+        await create_notification(
+            user["id"],
+            "moderation",
+            f'Your video "{video_data.title}" is under review for content policy compliance',
+            None
+        )
+    
     return Video(**video_doc)
 
 @api_router.get("/videos/feed")
@@ -407,6 +506,18 @@ async def create_comment(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     
+    # If it's a reply, verify parent comment exists
+    if comment_data.parent_id:
+        parent = await db.comments.find_one({"id": comment_data.parent_id})
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent comment not found")
+        
+        # Increment reply count on parent
+        await db.comments.update_one(
+            {"id": comment_data.parent_id},
+            {"$inc": {"reply_count": 1}}
+        )
+    
     comment_id = str(uuid.uuid4())
     comment_doc = {
         "id": comment_id,
@@ -415,13 +526,17 @@ async def create_comment(
         "username": user["username"],
         "user_avatar": user.get("avatar"),
         "text": comment_data.text,
-        "created_at": datetime.now(timezone.utc).isoformat()
+        "parent_id": comment_data.parent_id,
+        "edited": False,
+        "reply_count": 0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": None
     }
     
     await db.comments.insert_one(comment_doc)
     
-    # Notify video owner about new comment
-    if video["user_id"] != user["id"]:
+    # Notify video owner about new comment (not for replies to avoid spam)
+    if video["user_id"] != user["id"] and not comment_data.parent_id:
         await create_notification(
             video["user_id"],
             "comment",
@@ -433,11 +548,48 @@ async def create_comment(
 
 @api_router.get("/videos/{video_id}/comments")
 async def get_video_comments(video_id: str, skip: int = 0, limit: int = 50):
+    # Get top-level comments only (no parent_id)
     comments = await db.comments.find(
-        {"video_id": video_id},
+        {"video_id": video_id, "parent_id": None},
         {"_id": 0}
     ).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
     return comments
+
+@api_router.get("/comments/{comment_id}/replies")
+async def get_comment_replies(comment_id: str, skip: int = 0, limit: int = 20):
+    """Get replies to a specific comment"""
+    replies = await db.comments.find(
+        {"parent_id": comment_id},
+        {"_id": 0}
+    ).sort("created_at", 1).skip(skip).limit(limit).to_list(limit)
+    return replies
+
+@api_router.put("/comments/{comment_id}")
+async def update_comment(
+    comment_id: str,
+    comment_data: CommentUpdate,
+    authorization: Optional[str] = Header(None)
+):
+    """Edit a comment"""
+    user = await get_current_user(authorization)
+    
+    comment = await db.comments.find_one({"id": comment_id})
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    
+    if comment["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Not authorized to edit this comment")
+    
+    await db.comments.update_one(
+        {"id": comment_id},
+        {"$set": {
+            "text": comment_data.text,
+            "edited": True,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
+    return {"message": "Comment updated"}
 
 @api_router.delete("/comments/{comment_id}")
 async def delete_comment(comment_id: str, authorization: Optional[str] = Header(None)):
@@ -1025,3 +1177,162 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+# ============= ADVANCED ANALYTICS =============
+
+@api_router.get("/admin/analytics/timeseries")
+async def get_analytics_timeseries(
+    days: int = 30,
+    authorization: Optional[str] = Header(None)
+):
+    """Get time-series analytics data for charts"""
+    admin = await get_current_user(authorization)
+    
+    if admin["email"] not in ["admin@example.com"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Calculate date range
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=days)
+    
+    # User growth over time
+    users_pipeline = [
+        {
+            "$match": {
+                "created_at": {"$gte": start_date.isoformat()}
+            }
+        },
+        {
+            "$group": {
+                "_id": {"$substr": ["$created_at", 0, 10]},
+                "count": {"$sum": 1}
+            }
+        },
+        {"$sort": {"_id": 1}}
+    ]
+    
+    # Video uploads over time
+    videos_pipeline = [
+        {
+            "$match": {
+                "created_at": {"$gte": start_date.isoformat()}
+            }
+        },
+        {
+            "$group": {
+                "_id": {"$substr": ["$created_at", 0, 10]},
+                "count": {"$sum": 1},
+                "total_views": {"$sum": "$view_count"}
+            }
+        },
+        {"$sort": {"_id": 1}}
+    ]
+    
+    # Revenue over time (from transactions)
+    revenue_pipeline = [
+        {
+            "$match": {
+                "created_at": {"$gte": start_date.isoformat()},
+                "payment_status": "completed"
+            }
+        },
+        {
+            "$group": {
+                "_id": {"$substr": ["$created_at", 0, 10]},
+                "revenue": {"$sum": "$amount"},
+                "count": {"$sum": 1}
+            }
+        },
+        {"$sort": {"_id": 1}}
+    ]
+    
+    # Execute aggregations
+    user_growth = await db.users.aggregate(users_pipeline).to_list(days)
+    video_stats = await db.videos.aggregate(videos_pipeline).to_list(days)
+    revenue_stats = await db.payment_transactions.aggregate(revenue_pipeline).to_list(days)
+    
+    # Fill missing dates with zeros
+    date_range = [(start_date + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
+    
+    user_growth_dict = {item["_id"]: item["count"] for item in user_growth}
+    video_stats_dict = {item["_id"]: item for item in video_stats}
+    revenue_stats_dict = {item["_id"]: item for item in revenue_stats}
+    
+    chart_data = []
+    cumulative_users = 0
+    
+    for date in date_range:
+        cumulative_users += user_growth_dict.get(date, 0)
+        video_data = video_stats_dict.get(date, {"count": 0, "total_views": 0})
+        revenue_data = revenue_stats_dict.get(date, {"revenue": 0, "count": 0})
+        
+        chart_data.append({
+            "date": date,
+            "new_users": user_growth_dict.get(date, 0),
+            "total_users": cumulative_users,
+            "videos_uploaded": video_data["count"],
+            "total_views": video_data.get("total_views", 0),
+            "revenue": float(revenue_data.get("revenue", 0)),
+            "transactions": revenue_data.get("count", 0)
+        })
+    
+    return chart_data
+
+@api_router.get("/admin/analytics/engagement")
+async def get_engagement_metrics(authorization: Optional[str] = Header(None)):
+    """Get engagement metrics for admin dashboard"""
+    admin = await get_current_user(authorization)
+    
+    if admin["email"] not in ["admin@example.com"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Calculate various engagement metrics
+    total_videos = await db.videos.count_documents({"status": "active"})
+    total_comments = await db.comments.count_documents({})
+    total_notifications = await db.notifications.count_documents({})
+    
+    # Average views per video
+    avg_views_pipeline = [
+        {"$match": {"status": "active"}},
+        {"$group": {
+            "_id": None,
+            "avg_views": {"$avg": "$view_count"},
+            "total_views": {"$sum": "$view_count"}
+        }}
+    ]
+    
+    avg_views = await db.videos.aggregate(avg_views_pipeline).to_list(1)
+    avg_views_result = avg_views[0] if avg_views else {"avg_views": 0, "total_views": 0}
+    
+    # Top creators by views
+    top_creators_pipeline = [
+        {"$match": {"status": "active"}},
+        {"$group": {
+            "_id": "$user_id",
+            "username": {"$first": "$username"},
+            "total_views": {"$sum": "$view_count"},
+            "video_count": {"$sum": 1}
+        }},
+        {"$sort": {"total_views": -1}},
+        {"$limit": 5}
+    ]
+    
+    top_creators = await db.videos.aggregate(top_creators_pipeline).to_list(5)
+    
+    # Clean up MongoDB _id
+    for creator in top_creators:
+        creator.pop("_id", None)
+    
+    return {
+        "total_videos": total_videos,
+        "total_comments": total_comments,
+        "total_notifications": total_notifications,
+        "average_views_per_video": round(avg_views_result["avg_views"], 2),
+        "total_platform_views": avg_views_result["total_views"],
+        "top_creators": top_creators,
+        "comments_per_video": round(total_comments / total_videos, 2) if total_videos > 0 else 0
+    }
+
+# Mount Socket.IO app
+app.mount("/socket.io", socket_app)

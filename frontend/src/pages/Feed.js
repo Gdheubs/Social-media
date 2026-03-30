@@ -14,6 +14,10 @@ const CommentSection = ({ video, isOpen, onClose }) => {
   const [comments, setComments] = useState([]);
   const [newComment, setNewComment] = useState('');
   const [loading, setLoading] = useState(false);
+  const [replyTo, setReplyTo] = useState(null);
+  const [editingComment, setEditingComment] = useState(null);
+  const [editText, setEditText] = useState('');
+  const [expandedComments, setExpandedComments] = useState(new Set());
 
   useEffect(() => {
     if (isOpen && video) {
@@ -30,6 +34,16 @@ const CommentSection = ({ video, isOpen, onClose }) => {
     }
   };
 
+  const fetchReplies = async (commentId) => {
+    try {
+      const response = await axios.get(`${API}/comments/${commentId}/replies`);
+      return response.data;
+    } catch (error) {
+      console.error('Failed to load replies');
+      return [];
+    }
+  };
+
   const handleSubmitComment = async (e) => {
     e.preventDefault();
     if (!newComment.trim()) return;
@@ -39,17 +53,175 @@ const CommentSection = ({ video, isOpen, onClose }) => {
       const token = localStorage.getItem('token');
       await axios.post(
         `${API}/videos/${video.id}/comments`,
-        { text: newComment },
+        { 
+          text: newComment,
+          parent_id: replyTo?.id || null
+        },
         { headers: { Authorization: `Bearer ${token}` } }
       );
       setNewComment('');
+      setReplyTo(null);
       fetchComments();
-      toast.success('Comment added');
+      toast.success(replyTo ? 'Reply added' : 'Comment added');
     } catch (error) {
       toast.error('Failed to add comment');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleEditComment = async (commentId) => {
+    if (!editText.trim()) return;
+
+    try {
+      const token = localStorage.getItem('token');
+      await axios.put(
+        `${API}/comments/${commentId}`,
+        { text: editText },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setEditingComment(null);
+      setEditText('');
+      fetchComments();
+      toast.success('Comment updated');
+    } catch (error) {
+      toast.error('Failed to update comment');
+    }
+  };
+
+  const handleDeleteComment = async (commentId) => {
+    try {
+      const token = localStorage.getItem('token');
+      await axios.delete(`${API}/comments/${commentId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      fetchComments();
+      toast.success('Comment deleted');
+    } catch (error) {
+      toast.error('Failed to delete comment');
+    }
+  };
+
+  const toggleReplies = async (commentId) => {
+    const newExpanded = new Set(expandedComments);
+    if (newExpanded.has(commentId)) {
+      newExpanded.delete(commentId);
+    } else {
+      newExpanded.add(commentId);
+      const replies = await fetchReplies(commentId);
+      // Store replies in state
+      setComments(prev => {
+        const updated = [...prev];
+        const comment = updated.find(c => c.id === commentId);
+        if (comment) {
+          comment.replies = replies;
+        }
+        return updated;
+      });
+    }
+    setExpandedComments(newExpanded);
+  };
+
+  const renderComment = (comment, isReply = false) => {
+    const currentUser = JSON.parse(localStorage.getItem('user'));
+    const isOwner = currentUser?.id === comment.user_id;
+
+    return (
+      <div key={comment.id} className={`${isReply ? 'ml-12' : ''}`}>
+        <div className="flex gap-3" data-testid="comment-item">
+          <img
+            src={comment.user_avatar || 'https://images.unsplash.com/photo-1758486190195-dd677b21e00f?w=100&h=100&fit=crop'}
+            alt={comment.username}
+            className="w-10 h-10 rounded-full flex-shrink-0"
+          />
+          <div className="flex-1">
+            <div className="bg-white/5 rounded-xl p-3">
+              <p className="font-semibold text-sm mb-1">{comment.username}</p>
+              {editingComment === comment.id ? (
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    className="input-field w-full text-sm"
+                    value={editText}
+                    onChange={(e) => setEditText(e.target.value)}
+                    autoFocus
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleEditComment(comment.id)}
+                      className="text-xs px-3 py-1 bg-[#10B981] text-black rounded-full font-medium"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => {
+                        setEditingComment(null);
+                        setEditText('');
+                      }}
+                      className="text-xs px-3 py-1 bg-white/10 rounded-full"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <p className="text-sm">{comment.text}</p>
+                  {comment.edited && (
+                    <p className="text-xs text-[#A0A0A5] mt-1">(edited)</p>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="flex items-center gap-4 mt-2 text-xs text-[#A0A0A5]">
+              <span>{new Date(comment.created_at).toLocaleDateString()}</span>
+              {!isReply && (
+                <button
+                  onClick={() => setReplyTo(comment)}
+                  className="hover:text-[#10B981] transition-colors"
+                  data-testid={`reply-btn-${comment.id}`}
+                >
+                  Reply
+                </button>
+              )}
+              {isOwner && editingComment !== comment.id && (
+                <>
+                  <button
+                    onClick={() => {
+                      setEditingComment(comment.id);
+                      setEditText(comment.text);
+                    }}
+                    className="hover:text-[#10B981] transition-colors"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => handleDeleteComment(comment.id)}
+                    className="hover:text-[#F43F5E] transition-colors"
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
+              {!isReply && comment.reply_count > 0 && (
+                <button
+                  onClick={() => toggleReplies(comment.id)}
+                  className="hover:text-[#10B981] transition-colors font-medium"
+                >
+                  {expandedComments.has(comment.id) ? 'Hide' : 'View'} {comment.reply_count} {comment.reply_count === 1 ? 'reply' : 'replies'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+        {/* Render replies */}
+        {expandedComments.has(comment.id) && comment.replies && (
+          <div className="mt-3 space-y-3">
+            {comment.replies.map(reply => renderComment(reply, true))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   if (!isOpen) return null;
@@ -88,32 +260,31 @@ const CommentSection = ({ video, isOpen, onClose }) => {
                 <p>No comments yet. Be the first!</p>
               </div>
             ) : (
-              comments.map((comment) => (
-                <div key={comment.id} className="flex gap-3" data-testid="comment-item">
-                  <img
-                    src={comment.user_avatar || 'https://images.unsplash.com/photo-1758486190195-dd677b21e00f?w=100&h=100&fit=crop'}
-                    alt={comment.username}
-                    className="w-10 h-10 rounded-full"
-                  />
-                  <div className="flex-1">
-                    <p className="font-semibold text-sm">{comment.username}</p>
-                    <p className="text-sm">{comment.text}</p>
-                    <p className="text-xs text-[#A0A0A5] mt-1">
-                      {new Date(comment.created_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                </div>
-              ))
+              comments.map((comment) => renderComment(comment))
             )}
           </div>
 
           <form onSubmit={handleSubmitComment} className="p-6 border-t border-white/10">
+            {replyTo && (
+              <div className="mb-3 p-2 bg-white/5 rounded-lg flex items-center justify-between">
+                <span className="text-sm text-[#A0A0A5]">
+                  Replying to <span className="text-white font-medium">{replyTo.username}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setReplyTo(null)}
+                  className="text-[#F43F5E] text-xs hover:underline"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
             <div className="flex gap-3">
               <input
                 data-testid="comment-input"
                 type="text"
                 className="input-field flex-1"
-                placeholder="Add a comment..."
+                placeholder={replyTo ? "Write a reply..." : "Add a comment..."}
                 value={newComment}
                 onChange={(e) => setNewComment(e.target.value)}
                 disabled={loading}

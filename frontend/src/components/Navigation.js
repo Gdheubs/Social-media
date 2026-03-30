@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { Home, Upload, User, Wallet, BarChart3, Heart, Bell, Shield } from 'lucide-react';
 import axios from 'axios';
 import NotificationCenter from './NotificationCenter';
+import websocketService from '@/services/websocket';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -14,9 +15,25 @@ const Navigation = ({ user, onLogout }) => {
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
+    // Initialize WebSocket connection
+    const token = localStorage.getItem('token');
+    if (token) {
+      websocketService.connect(token);
+      
+      // Listen for real-time notifications
+      const listenerId = websocketService.on('new_notification', (notification) => {
+        setUnreadCount(prev => prev + 1);
+        // Optionally show a toast notification
+      });
+
+      return () => {
+        websocketService.off(listenerId);
+      };
+    }
+  }, []);
+
+  useEffect(() => {
     fetchUnreadCount();
-    const interval = setInterval(fetchUnreadCount, 30000); // Poll every 30s
-    return () => clearInterval(interval);
   }, []);
 
   const fetchUnreadCount = async () => {

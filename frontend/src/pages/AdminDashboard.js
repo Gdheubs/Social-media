@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Shield, Users, Video, Flag, CheckCircle, XCircle, Eye } from 'lucide-react';
+import { Shield, Users, Video, Flag, CheckCircle, XCircle, Eye, TrendingUp, DollarSign } from 'lucide-react';
 import axios from 'axios';
 import { toast } from 'sonner';
 import Navigation from '@/components/Navigation';
+import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -14,6 +15,8 @@ const AdminDashboard = ({ user, onLogout }) => {
   const [flags, setFlags] = useState([]);
   const [activeTab, setActiveTab] = useState('overview');
   const [loading, setLoading] = useState(true);
+  const [timeseriesData, setTimeseriesData] = useState([]);
+  const [engagementData, setEngagementData] = useState(null);
 
   useEffect(() => {
     if (user?.email !== 'admin@example.com') {
@@ -28,15 +31,19 @@ const AdminDashboard = ({ user, onLogout }) => {
       const token = localStorage.getItem('token');
       const headers = { Authorization: `Bearer ${token}` };
 
-      const [statsRes, usersRes, flagsRes] = await Promise.all([
+      const [statsRes, usersRes, flagsRes, timeseriesRes, engagementRes] = await Promise.all([
         axios.get(`${API}/admin/stats`, { headers }),
         axios.get(`${API}/admin/users?limit=20`, { headers }),
-        axios.get(`${API}/moderation/queue`, { headers })
+        axios.get(`${API}/moderation/queue`, { headers }),
+        axios.get(`${API}/admin/analytics/timeseries?days=30`, { headers }),
+        axios.get(`${API}/admin/analytics/engagement`, { headers })
       ]);
 
       setStats(statsRes.data);
       setUsers(usersRes.data);
       setFlags(flagsRes.data);
+      setTimeseriesData(timeseriesRes.data);
+      setEngagementData(engagementRes.data);
     } catch (error) {
       toast.error('Failed to load admin data');
     } finally {
@@ -268,28 +275,157 @@ const AdminDashboard = ({ user, onLogout }) => {
 
           {/* Overview Tab */}
           {activeTab === 'overview' && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-6">
+              {/* User Growth Chart */}
               <div className="neumorphism-dark rounded-2xl p-8">
-                <h3 className="text-xl font-semibold mb-4">Recent Activity</h3>
-                <p className="text-[#A0A0A5]">Platform activity overview coming soon</p>
+                <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
+                  <TrendingUp className="w-6 h-6 text-[#10B981]" />
+                  User Growth (Last 30 Days)
+                </h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <AreaChart data={timeseriesData}>
+                    <defs>
+                      <linearGradient id="userGradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#10B981" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                    <XAxis dataKey="date" stroke="#A0A0A5" tick={{ fontSize: 12 }} />
+                    <YAxis stroke="#A0A0A5" tick={{ fontSize: 12 }} />
+                    <Tooltip
+                      contentStyle={{
+                        background: '#141414',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        borderRadius: '8px',
+                        color: '#fff'
+                      }}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="total_users"
+                      stroke="#10B981"
+                      strokeWidth={3}
+                      fill="url(#userGradient)"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
               </div>
-              <div className="neumorphism-dark rounded-2xl p-8">
-                <h3 className="text-xl font-semibold mb-4">System Health</h3>
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-[#A0A0A5]">API Status</span>
-                    <span className="px-3 py-1 rounded-full bg-[#10B981]/20 text-[#10B981] text-sm">Operational</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-[#A0A0A5]">Database</span>
-                    <span className="px-3 py-1 rounded-full bg-[#10B981]/20 text-[#10B981] text-sm">Connected</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-[#A0A0A5]">Payments</span>
-                    <span className="px-3 py-1 rounded-full bg-[#10B981]/20 text-[#10B981] text-sm">Active</span>
-                  </div>
+
+              {/* Revenue & Videos Chart */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="neumorphism-dark rounded-2xl p-8">
+                  <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
+                    <DollarSign className="w-6 h-6 text-[#10B981]" />
+                    Revenue Trends
+                  </h3>
+                  <ResponsiveContainer width="100%" height={250}>
+                    <LineChart data={timeseriesData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                      <XAxis dataKey="date" stroke="#A0A0A5" tick={{ fontSize: 10 }} />
+                      <YAxis stroke="#A0A0A5" tick={{ fontSize: 10 }} />
+                      <Tooltip
+                        contentStyle={{
+                          background: '#141414',
+                          border: '1px solid rgba(255,255,255,0.1)',
+                          borderRadius: '8px',
+                          color: '#fff'
+                        }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="revenue"
+                        stroke="#10B981"
+                        strokeWidth={3}
+                        dot={{ fill: '#10B981', r: 4 }}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div className="neumorphism-dark rounded-2xl p-8">
+                  <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
+                    <Video className="w-6 h-6 text-[#10B981]" />
+                    Video Uploads
+                  </h3>
+                  <ResponsiveContainer width="100%" height={250}>
+                    <BarChart data={timeseriesData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                      <XAxis dataKey="date" stroke="#A0A0A5" tick={{ fontSize: 10 }} />
+                      <YAxis stroke="#A0A0A5" tick={{ fontSize: 10 }} />
+                      <Tooltip
+                        contentStyle={{
+                          background: '#141414',
+                          border: '1px solid rgba(255,255,255,0.1)',
+                          borderRadius: '8px',
+                          color: '#fff'
+                        }}
+                      />
+                      <Bar dataKey="videos_uploaded" fill="#10B981" radius={[8, 8, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
                 </div>
               </div>
+
+              {/* Engagement Metrics */}
+              {engagementData && (
+                <div className="neumorphism-dark rounded-2xl p-8">
+                  <h3 className="text-xl font-semibold mb-6">Engagement Metrics</h3>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                    <div className="text-center">
+                      <p className="text-3xl font-black text-[#10B981]">
+                        {engagementData.average_views_per_video.toFixed(0)}
+                      </p>
+                      <p className="text-sm text-[#A0A0A5] mt-1">Avg Views/Video</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-3xl font-black text-[#10B981]">
+                        {engagementData.comments_per_video.toFixed(1)}
+                      </p>
+                      <p className="text-sm text-[#A0A0A5] mt-1">Comments/Video</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-3xl font-black text-[#10B981]">
+                        {engagementData.total_comments.toLocaleString()}
+                      </p>
+                      <p className="text-sm text-[#A0A0A5] mt-1">Total Comments</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-3xl font-black text-[#10B981]">
+                        {engagementData.total_platform_views.toLocaleString()}
+                      </p>
+                      <p className="text-sm text-[#A0A0A5] mt-1">Platform Views</p>
+                    </div>
+                  </div>
+
+                  {/* Top Creators */}
+                  <div className="mt-8">
+                    <h4 className="font-semibold mb-4">Top Creators</h4>
+                    <div className="space-y-3">
+                      {engagementData.top_creators.map((creator, index) => (
+                        <div
+                          key={creator.username}
+                          className="flex items-center justify-between p-3 bg-[#0A0A0A] rounded-xl"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-2xl font-black text-[#10B981]">#{index + 1}</span>
+                            <div>
+                              <p className="font-semibold">{creator.username}</p>
+                              <p className="text-xs text-[#A0A0A5]">
+                                {creator.video_count} videos
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="font-semibold">{creator.total_views.toLocaleString()}</p>
+                            <p className="text-xs text-[#A0A0A5]">views</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </motion.div>
