@@ -8,6 +8,7 @@ import Profile from '@/pages/Profile';
 import Wallet from '@/pages/Wallet';
 import Analytics from '@/pages/Analytics';
 import Fundraisers from '@/pages/Fundraisers';
+import AdminDashboard from '@/pages/AdminDashboard';
 import TipSuccess from '@/pages/TipSuccess';
 import FundraiserSuccess from '@/pages/FundraiserSuccess';
 import '@/index.css';
@@ -94,6 +95,14 @@ const App = () => {
             element={
               isAuthenticated ? 
               <Fundraisers user={user} onLogout={handleLogout} /> : 
+              <Navigate to="/" />
+            } 
+          />
+          <Route 
+            path="/admin" 
+            element={
+              isAuthenticated ? 
+              <AdminDashboard user={user} onLogout={handleLogout} /> : 
               <Navigate to="/" />
             } 
           />

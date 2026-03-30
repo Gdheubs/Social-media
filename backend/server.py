@@ -116,6 +116,29 @@ class ModerationFlag(BaseModel):
     video_id: str
     reason: str
 
+class CommentCreate(BaseModel):
+    text: str
+
+class Comment(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    video_id: str
+    user_id: str
+    username: str
+    user_avatar: Optional[str]
+    text: str
+    created_at: str
+
+class Notification(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    user_id: str
+    type: str  # tip, comment, fundraiser, milestone
+    message: str
+    link: Optional[str]
+    read: bool
+    created_at: str
+
 # ============= HELPER FUNCTIONS =============
 
 def hash_password(password: str) -> str:
@@ -147,6 +170,19 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+async def create_notification(user_id: str, notification_type: str, message: str, link: Optional[str] = None):
+    """Helper to create notifications"""
+    notification_doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "type": notification_type,
+        "message": message,
+        "link": link,
+        "read": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.notifications.insert_one(notification_doc)
 
 # ============= AUTH ROUTES =============
 
@@ -357,6 +393,209 @@ async def get_user_videos(username: str, skip: int = 0, limit: int = 20):
 
 # ============= TIP ROUTES =============
 
+# ============= COMMENT ROUTES =============
+
+@api_router.post("/videos/{video_id}/comments")
+async def create_comment(
+    video_id: str,
+    comment_data: CommentCreate,
+    authorization: Optional[str] = Header(None)
+):
+    user = await get_current_user(authorization)
+    
+    video = await db.videos.find_one({"id": video_id})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    comment_id = str(uuid.uuid4())
+    comment_doc = {
+        "id": comment_id,
+        "video_id": video_id,
+        "user_id": user["id"],
+        "username": user["username"],
+        "user_avatar": user.get("avatar"),
+        "text": comment_data.text,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.comments.insert_one(comment_doc)
+    
+    # Notify video owner about new comment
+    if video["user_id"] != user["id"]:
+        await create_notification(
+            video["user_id"],
+            "comment",
+            f'{user["username"]} commented on your video "{video["title"]}"',
+            f"/feed?video={video_id}"
+        )
+    
+    return Comment(**comment_doc)
+
+@api_router.get("/videos/{video_id}/comments")
+async def get_video_comments(video_id: str, skip: int = 0, limit: int = 50):
+    comments = await db.comments.find(
+        {"video_id": video_id},
+        {"_id": 0}
+    ).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
+    return comments
+
+@api_router.delete("/comments/{comment_id}")
+async def delete_comment(comment_id: str, authorization: Optional[str] = Header(None)):
+    user = await get_current_user(authorization)
+    
+    comment = await db.comments.find_one({"id": comment_id})
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    
+    if comment["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this comment")
+    
+    await db.comments.delete_one({"id": comment_id})
+    return {"message": "Comment deleted"}
+
+# ============= SEARCH & FILTER =============
+
+@api_router.get("/videos/search/query")
+async def search_videos(
+    q: str = Query(""),
+    aspect_ratio: Optional[str] = None,
+    sort: str = Query("recent", enum=["recent", "popular"]),
+    skip: int = 0,
+    limit: int = 20
+):
+    query = {"status": "active"}
+    
+    if q:
+        # Search in title and description
+        query["$or"] = [
+            {"title": {"$regex": q, "$options": "i"}},
+            {"description": {"$regex": q, "$options": "i"}},
+            {"username": {"$regex": q, "$options": "i"}}
+        ]
+    
+    if aspect_ratio:
+        query["aspect_ratio"] = aspect_ratio
+    
+    sort_field = "created_at" if sort == "recent" else "view_count"
+    
+    videos = await db.videos.find(query, {"_id": 0}).sort(sort_field, -1).skip(skip).limit(limit).to_list(limit)
+    return videos
+
+# ============= NOTIFICATION ROUTES =============
+
+@api_router.get("/notifications")
+async def get_notifications(
+    authorization: Optional[str] = Header(None),
+    skip: int = 0,
+    limit: int = 50
+):
+    user = await get_current_user(authorization)
+    
+    notifications = await db.notifications.find(
+        {"user_id": user["id"]},
+        {"_id": 0}
+    ).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
+    
+    unread_count = await db.notifications.count_documents({
+        "user_id": user["id"],
+        "read": False
+    })
+    
+    return {
+        "notifications": notifications,
+        "unread_count": unread_count
+    }
+
+@api_router.put("/notifications/{notification_id}/read")
+async def mark_notification_read(
+    notification_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    user = await get_current_user(authorization)
+    
+    notification = await db.notifications.find_one({"id": notification_id})
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    
+    if notification["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    await db.notifications.update_one(
+        {"id": notification_id},
+        {"$set": {"read": True}}
+    )
+    
+    return {"message": "Notification marked as read"}
+
+@api_router.put("/notifications/read-all")
+async def mark_all_notifications_read(authorization: Optional[str] = Header(None)):
+    user = await get_current_user(authorization)
+    
+    await db.notifications.update_many(
+        {"user_id": user["id"], "read": False},
+        {"$set": {"read": True}}
+    )
+    
+    return {"message": "All notifications marked as read"}
+
+# ============= CREATOR SPOTLIGHT =============
+
+@api_router.get("/creators/spotlight")
+async def get_creator_spotlight(limit: int = 10):
+    # Get videos from last 7 days
+    seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    
+    # Aggregate top creators by views + tips
+    pipeline = [
+        {
+            "$match": {
+                "status": "active",
+                "created_at": {"$gte": seven_days_ago}
+            }
+        },
+        {
+            "$group": {
+                "_id": "$user_id",
+                "username": {"$first": "$username"},
+                "user_avatar": {"$first": "$user_avatar"},
+                "total_views": {"$sum": "$view_count"},
+                "total_tips": {"$sum": "$tips_received"},
+                "video_count": {"$sum": 1},
+                "top_video": {"$first": "$$ROOT"}
+            }
+        },
+        {
+            "$project": {
+                "user_id": "$_id",
+                "username": 1,
+                "user_avatar": 1,
+                "total_views": 1,
+                "total_tips": 1,
+                "video_count": 1,
+                "top_video": 1,
+                "spotlight_score": {
+                    "$add": [
+                        "$total_views",
+                        {"$multiply": ["$total_tips", 1000]}
+                    ]
+                }
+            }
+        },
+        {"$sort": {"spotlight_score": -1}},
+        {"$limit": limit}
+    ]
+    
+    creators = await db.videos.aggregate(pipeline).to_list(limit)
+    
+    # Clean up MongoDB _id fields
+    for creator in creators:
+        creator.pop("_id", None)
+        if "top_video" in creator and "_id" in creator["top_video"]:
+            creator["top_video"].pop("_id", None)
+    
+    return creators
+
+
 @api_router.post("/tips/initiate")
 async def initiate_tip(
     tip_data: TipRequest,
@@ -451,6 +690,17 @@ async def get_tip_status(session_id: str, request: Request):
             {"id": transaction["video_id"]},
             {"$inc": {"tips_received": creator_amount}}
         )
+        
+        # Create notification for creator
+        video = await db.videos.find_one({"id": transaction["video_id"]})
+        tipper = await db.users.find_one({"id": transaction["from_user_id"]})
+        if video and tipper:
+            await create_notification(
+                transaction["to_user_id"],
+                "tip",
+                f'{tipper["username"]} tipped ${creator_amount:.2f} on your video "{video["title"]}"',
+                f"/wallet"
+            )
     
     return status
 
@@ -651,12 +901,110 @@ async def get_admin_stats(authorization: Optional[str] = Header(None)):
     total_users = await db.users.count_documents({})
     total_videos = await db.videos.count_documents({})
     total_transactions = await db.payment_transactions.count_documents({})
+    active_fundraisers = await db.fundraisers.count_documents({"status": "active"})
+    pending_flags = await db.moderation_flags.count_documents({"status": "pending"})
     
     return {
         "total_users": total_users,
         "total_videos": total_videos,
-        "total_transactions": total_transactions
+        "total_transactions": total_transactions,
+        "active_fundraisers": active_fundraisers,
+        "pending_flags": pending_flags
     }
+
+@api_router.get("/admin/users")
+async def get_all_users(
+    authorization: Optional[str] = Header(None),
+    skip: int = 0,
+    limit: int = 50
+):
+    user = await get_current_user(authorization)
+    
+    if user["email"] not in ["admin@example.com"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
+    return users
+
+@api_router.put("/admin/users/{user_id}/verify")
+async def verify_user(user_id: str, authorization: Optional[str] = Header(None)):
+    admin = await get_current_user(authorization)
+    
+    if admin["email"] not in ["admin@example.com"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"verification_status": True}}
+    )
+    
+    # Notify user
+    await create_notification(
+        user_id,
+        "milestone",
+        "Congratulations! Your account has been verified.",
+        "/profile"
+    )
+    
+    return {"message": "User verified"}
+
+@api_router.delete("/admin/videos/{video_id}")
+async def delete_video_admin(video_id: str, authorization: Optional[str] = Header(None)):
+    admin = await get_current_user(authorization)
+    
+    if admin["email"] not in ["admin@example.com"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    video = await db.videos.find_one({"id": video_id})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    # Update status instead of deleting
+    await db.videos.update_one(
+        {"id": video_id},
+        {"$set": {"status": "removed"}}
+    )
+    
+    # Notify video owner
+    await create_notification(
+        video["user_id"],
+        "moderation",
+        f'Your video "{video["title"]}" was removed by moderators',
+        None
+    )
+    
+    return {"message": "Video removed"}
+
+@api_router.put("/admin/flags/{flag_id}/resolve")
+async def resolve_flag(
+    flag_id: str,
+    action: str,
+    authorization: Optional[str] = Header(None)
+):
+    admin = await get_current_user(authorization)
+    
+    if admin["email"] not in ["admin@example.com"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    flag = await db.moderation_flags.find_one({"id": flag_id})
+    if not flag:
+        raise HTTPException(status_code=404, detail="Flag not found")
+    
+    await db.moderation_flags.update_one(
+        {"id": flag_id},
+        {"$set": {
+            "status": "reviewed",
+            "reviewed_by": admin["id"]
+        }}
+    )
+    
+    if action == "remove":
+        await db.videos.update_one(
+            {"id": flag["video_id"]},
+            {"$set": {"status": "removed"}}
+        )
+    
+    return {"message": "Flag resolved"}
 
 app.include_router(api_router)
 
