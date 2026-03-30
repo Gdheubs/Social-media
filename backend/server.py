@@ -966,62 +966,74 @@ async def contribute_to_fundraiser(
     success_url = f"{origin}/fundraiser-success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/fundraisers"
     
-    host_url = str(request.base_url)
-    webhook_url = f"{host_url}api/webhook/stripe"
-    stripe_checkout = StripeCheckout(api_key=stripe_api_key, webhook_url=webhook_url)
-    
-    checkout_request = CheckoutSessionRequest(
-        amount=amount,
-        currency="usd",
-        success_url=success_url,
-        cancel_url=cancel_url,
-        metadata={
-            "type": "fundraiser",
-            "contributor_id": user["id"],
-            "fundraiser_id": fundraiser_id
-        }
-    )
-    
-    session = await stripe_checkout.create_checkout_session(checkout_request)
-    
-    transaction_doc = {
-        "id": str(uuid.uuid4()),
-        "session_id": session.session_id,
-        "from_user_id": user["id"],
-        "fundraiser_id": fundraiser_id,
-        "amount": amount,
-        "currency": "usd",
-        "type": "fundraiser",
-        "payment_status": "pending",
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
-    
-    await db.payment_transactions.insert_one(transaction_doc)
-    
-    return {"checkout_url": session.url, "session_id": session.session_id}
-
-@api_router.get("/fundraisers/status/{session_id}")
-async def get_fundraiser_status(session_id: str, request: Request):
-    host_url = str(request.base_url)
-    webhook_url = f"{host_url}api/webhook/stripe"
-    stripe_checkout = StripeCheckout(api_key=stripe_api_key, webhook_url=webhook_url)
-    
-    status = await stripe_checkout.get_checkout_status(session_id)
-    
-    transaction = await db.payment_transactions.find_one({"session_id": session_id})
-    
-    if transaction and transaction["payment_status"] != "completed" and status.payment_status == "paid":
-        await db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": "completed"}}
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'usd',
+                    'unit_amount': int(amount * 100),
+                    'product_data': {
+                        'name': f'Contribution to: {fundraiser["title"]}',
+                        'description': f'Fundraiser by {fundraiser["username"]}',
+                    },
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                "type": "fundraiser",
+                "contributor_id": user["id"],
+                "fundraiser_id": fundraiser_id
+            }
         )
         
-        await db.fundraisers.update_one(
-            {"id": transaction["fundraiser_id"]},
-            {"$inc": {"current_amount": transaction["amount"]}}
-        )
-    
-    return status
+        transaction_doc = {
+            "id": str(uuid.uuid4()),
+            "session_id": session.id,
+            "from_user_id": user["id"],
+            "fundraiser_id": fundraiser_id,
+            "amount": amount,
+            "currency": "usd",
+            "type": "fundraiser",
+            "payment_status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await db.payment_transactions.insert_one(transaction_doc)
+        
+        return {"checkout_url": session.url, "session_id": session.id}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create fundraiser checkout: {str(e)}")
+
+@api_router.get("/fundraisers/status/{session_id}")
+async def get_fundraiser_status(session_id: str):
+    try:
+        session = stripe.checkout.Session.retrieve(session_id)
+        
+        transaction = await db.payment_transactions.find_one({"session_id": session_id})
+        
+        if transaction and transaction["payment_status"] != "completed" and session.payment_status == "paid":
+            await db.payment_transactions.update_one(
+                {"session_id": session_id},
+                {"$set": {"payment_status": "completed"}}
+            )
+            
+            await db.fundraisers.update_one(
+                {"id": transaction["fundraiser_id"]},
+                {"$inc": {"current_amount": transaction["amount"]}}
+            )
+        
+        return {
+            "payment_status": session.payment_status,
+            "status": session.status
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get fundraiser status: {str(e)}")
 
 # ============= ANALYTICS ROUTES =============
 
@@ -1105,14 +1117,53 @@ async def get_moderation_queue(authorization: Optional[str] = Header(None)):
 async def stripe_webhook(request: Request):
     body = await request.body()
     signature = request.headers.get("Stripe-Signature")
-    
-    host_url = str(request.base_url)
-    webhook_url = f"{host_url}api/webhook/stripe"
-    stripe_checkout = StripeCheckout(api_key=stripe_api_key, webhook_url=webhook_url)
+    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
     
     try:
-        webhook_response = await stripe_checkout.handle_webhook(body, signature)
-        return {"status": "success", "event_type": webhook_response.event_type}
+        if webhook_secret and signature:
+            event = stripe.Webhook.construct_event(body, signature, webhook_secret)
+        else:
+            import json as _json
+            event = stripe.Event.construct_from(_json.loads(body), stripe.api_key)
+        
+        event_type = event.type
+        
+        if event_type == "checkout.session.completed":
+            session = event.data.object
+            session_id = session.id
+            payment_status = session.payment_status
+            
+            transaction = await db.payment_transactions.find_one({"session_id": session_id})
+            
+            if transaction and transaction["payment_status"] != "completed" and payment_status == "paid":
+                await db.payment_transactions.update_one(
+                    {"session_id": session_id},
+                    {"$set": {"payment_status": "completed"}}
+                )
+                
+                if transaction["type"] == "tip":
+                    platform_fee = transaction["amount"] * 0.05
+                    creator_amount = transaction["amount"] - platform_fee
+                    
+                    await db.users.update_one(
+                        {"id": transaction["to_user_id"]},
+                        {"$inc": {"wallet_balance": creator_amount}}
+                    )
+                    await db.videos.update_one(
+                        {"id": transaction["video_id"]},
+                        {"$inc": {"tips_received": creator_amount}}
+                    )
+                    
+                elif transaction["type"] == "fundraiser":
+                    await db.fundraisers.update_one(
+                        {"id": transaction["fundraiser_id"]},
+                        {"$inc": {"current_amount": transaction["amount"]}}
+                    )
+        
+        return {"status": "success", "event_type": event_type}
+        
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid webhook signature")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1232,8 +1283,6 @@ async def resolve_flag(
         )
     
     return {"message": "Flag resolved"}
-
-app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1593,3 +1642,6 @@ async def update_extended_profile(
     
     return {"message": "Profile updated"}
 
+
+# Include router AFTER all routes are defined
+app.include_router(api_router)

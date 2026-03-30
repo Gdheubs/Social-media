@@ -453,6 +453,7 @@ DB_NAME="creator_cosmos_prod"
 CORS_ORIGINS="https://creator-cosmos.com,https://www.creator-cosmos.com"
 JWT_SECRET="<generate-strong-random-secret>"
 STRIPE_API_KEY="sk_live_<your-live-key>"
+STRIPE_WEBHOOK_SECRET="whsec_<your-webhook-secret>"
 CLOUDINARY_CLOUD_NAME="dck4rnfs3"
 CLOUDINARY_API_KEY="523221771562841"
 CLOUDINARY_API_SECRET="fwPtyK5aPdBSwd4L7CpI8GP7m80"
@@ -851,6 +852,7 @@ JWT_SECRET="<GENERATE_USING: openssl rand -base64 32>"
 
 # Payments
 STRIPE_API_KEY="sk_live_<YOUR_STRIPE_LIVE_KEY>"
+STRIPE_WEBHOOK_SECRET="whsec_<YOUR_STRIPE_WEBHOOK_SECRET>"
 
 # Media Storage
 CLOUDINARY_CLOUD_NAME="dck4rnfs3"
