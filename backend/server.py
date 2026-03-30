@@ -808,8 +808,7 @@ async def initiate_tip(
     # Get origin from request
     origin = request.headers.get("origin") or request.headers.get("referer", "").rstrip("/")
     if not origin:
-        # Fallback to frontend URL from environment
-        origin = os.environ.get("FRONTEND_URL", "https://creator-cosmos.preview.emergentagent.com")
+        origin = os.environ.get("FRONTEND_URL", "")
     
     success_url = f"{origin}/tip-success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/feed"
@@ -949,8 +948,7 @@ async def contribute_to_fundraiser(
     
     origin = request.headers.get("origin") or request.headers.get("referer", "").rstrip("/")
     if not origin:
-        # Fallback to frontend URL from environment
-        origin = os.environ.get("FRONTEND_URL", "https://creator-cosmos.preview.emergentagent.com")
+        origin = os.environ.get("FRONTEND_URL", "")
     
     success_url = f"{origin}/fundraiser-success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/fundraisers"
@@ -1018,19 +1016,41 @@ async def get_fundraiser_status(session_id: str, request: Request):
 async def get_analytics_dashboard(authorization: Optional[str] = Header(None)):
     user = await get_current_user(authorization)
     
-    # Get user's videos
-    videos = await db.videos.find({"user_id": user["id"]}, {"_id": 0}).to_list(None)
+    # Get total count
+    total_videos = await db.videos.count_documents({"user_id": user["id"]})
     
-    total_videos = len(videos)
-    total_views = sum(v["view_count"] for v in videos)
-    total_tips = sum(v["tips_received"] for v in videos)
+    # Use aggregation for totals (efficient)
+    agg_result = await db.videos.aggregate([
+        {"$match": {"user_id": user["id"]}},
+        {"$group": {
+            "_id": None,
+            "total_views": {"$sum": "$view_count"},
+            "total_tips": {"$sum": "$tips_received"}
+        }}
+    ]).to_list(1)
+    
+    totals = agg_result[0] if agg_result else {"total_views": 0, "total_tips": 0}
+    
+    # Get recent videos (limited)
+    recent_videos = await db.videos.find(
+        {"user_id": user["id"]},
+        {
+            "_id": 0,
+            "id": 1,
+            "title": 1,
+            "view_count": 1,
+            "tips_received": 1,
+            "created_at": 1,
+            "cloudinary_url": 1
+        }
+    ).sort("created_at", -1).limit(10).to_list(10)
     
     return {
         "total_videos": total_videos,
-        "total_views": total_views,
-        "total_tips": total_tips,
+        "total_views": totals["total_views"],
+        "total_tips": totals["total_tips"],
         "wallet_balance": user["wallet_balance"],
-        "videos": videos[:10]  # Recent 10 videos
+        "videos": recent_videos
     }
 
 # ============= MODERATION ROUTES =============
