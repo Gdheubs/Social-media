@@ -236,8 +236,8 @@ async def update_profile(avatar: Optional[str] = None, bio: Optional[str] = None
 
 @api_router.get("/cloudinary/signature")
 async def generate_cloudinary_signature(
-    resource_type: str = Query("video", enum=["image", "video"]),
-    folder: str = "uploads",
+    resource_type: str = Query("video"),
+    folder: str = Query("uploads"),
     authorization: Optional[str] = Header(None)
 ):
     user = await get_current_user(authorization)
@@ -373,9 +373,10 @@ async def initiate_tip(
         raise HTTPException(status_code=400, detail="Cannot tip your own video")
     
     # Get origin from request
-    origin = request.headers.get("origin", "")
+    origin = request.headers.get("origin") or request.headers.get("referer", "").rstrip("/")
     if not origin:
-        raise HTTPException(status_code=400, detail="Origin header required")
+        # Fallback to frontend URL from environment
+        origin = os.environ.get("FRONTEND_URL", "https://creator-cosmos.preview.emergentagent.com")
     
     success_url = f"{origin}/tip-success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/feed"
@@ -502,9 +503,10 @@ async def contribute_to_fundraiser(
     if not fundraiser:
         raise HTTPException(status_code=404, detail="Fundraiser not found")
     
-    origin = request.headers.get("origin", "")
+    origin = request.headers.get("origin") or request.headers.get("referer", "").rstrip("/")
     if not origin:
-        raise HTTPException(status_code=400, detail="Origin header required")
+        # Fallback to frontend URL from environment
+        origin = os.environ.get("FRONTEND_URL", "https://creator-cosmos.preview.emergentagent.com")
     
     success_url = f"{origin}/fundraiser-success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/fundraisers"
