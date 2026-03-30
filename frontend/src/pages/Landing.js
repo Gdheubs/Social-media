@@ -69,7 +69,7 @@ const Landing = ({ onAuth }) => {
             
             <p className="text-lg sm:text-xl text-[#A0A0A5] mb-12 max-w-2xl mx-auto leading-relaxed">
               Join the next-gen hybrid social ecosystem where creators meet community. 
-              Upload vertical & horizontal videos, build your audience, and monetize your content.
+              Share your story, build your audience, and monetize your content.
             </p>
 
             <div className="flex flex-col sm:flex-row gap-4 justify-center mb-16">

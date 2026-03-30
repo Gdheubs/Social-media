@@ -19,6 +19,7 @@ from emergentintegrations.payments.stripe.checkout import StripeCheckout, Checko
 import socketio
 import asyncio
 from openai import AsyncOpenAI
+from agora_token_builder import RtcTokenBuilder
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -64,6 +65,15 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class PrivacySettings(BaseModel):
+    show_email: bool = False
+    show_phone: bool = False
+    show_birthday: bool = False
+    show_location: bool = False
+    show_followers_count: bool = True
+    show_following_count: bool = True
+    profile_visibility: str = "public"  # public, followers_only, private
+
 class User(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str
@@ -72,9 +82,16 @@ class User(BaseModel):
     account_type: str
     avatar: Optional[str] = None
     bio: Optional[str] = None
+    phone: Optional[str] = None
+    birthday: Optional[str] = None
+    location: Optional[str] = None
     verification_status: bool = False
     wallet_balance: float = 0.0
     total_views: int = 0
+    followers_count: int = 0
+    following_count: int = 0
+    auth_provider: str = "email"  # email, google, phone, facebook, twitter
+    privacy_settings: Optional[PrivacySettings] = None
     created_at: str
 
 class VideoUpload(BaseModel):
@@ -156,6 +173,31 @@ class Notification(BaseModel):
     link: Optional[str]
     read: bool
     created_at: str
+
+class LiveStreamCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    category: Optional[str] = "general"
+
+class LiveStream(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    user_id: str
+    username: str
+    user_avatar: Optional[str]
+    channel_name: str
+    title: str
+    description: Optional[str]
+    category: str
+    viewer_count: int
+    status: str  # live, ended
+    started_at: str
+    ended_at: Optional[str] = None
+
+class AgoraTokenRequest(BaseModel):
+    channel_name: str
+    uid: Optional[int] = 0
+    role: str = "publisher"  # publisher or subscriber
 
 # ============= HELPER FUNCTIONS =============
 
@@ -1336,3 +1378,185 @@ async def get_engagement_metrics(authorization: Optional[str] = Header(None)):
 
 # Mount Socket.IO app
 app.mount("/socket.io", socket_app)
+
+
+# ============= LIVE STREAMING ROUTES =============
+
+@api_router.post("/live/token")
+async def generate_agora_token(
+    token_request: AgoraTokenRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Generate Agora RTC token for live streaming."""
+    user = await get_current_user(authorization)
+    
+    agora_app_id = os.environ.get('AGORA_APP_ID')
+    agora_app_certificate = os.environ.get('AGORA_APP_CERTIFICATE')
+    
+    if not agora_app_id or not agora_app_certificate:
+        raise HTTPException(status_code=500, detail="Agora credentials not configured")
+    
+    # Set role: 1 = publisher/host, 2 = subscriber/audience
+    role = 1 if token_request.role == "publisher" else 2
+    
+    # Token expires in 1 hour
+    expiration_time = int(time.time()) + 3600
+    
+    try:
+        token = RtcTokenBuilder.buildTokenWithUid(
+            appId=agora_app_id,
+            appCertificate=agora_app_certificate,
+            channelName=token_request.channel_name,
+            uid=token_request.uid,
+            role=role,
+            privilegeExpiredTs=expiration_time
+        )
+        
+        return {
+            "token": token,
+            "app_id": agora_app_id,
+            "channel": token_request.channel_name,
+            "uid": token_request.uid,
+            "expiration": expiration_time
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate token: {str(e)}")
+
+@api_router.post("/live/start")
+async def start_live_stream(
+    stream_data: LiveStreamCreate,
+    authorization: Optional[str] = Header(None)
+):
+    """Start a new live stream."""
+    user = await get_current_user(authorization)
+    
+    # Generate unique channel name
+    channel_name = f"live-{user['id']}-{int(time.time())}"
+    
+    stream_id = str(uuid.uuid4())
+    stream_doc = {
+        "id": stream_id,
+        "user_id": user["id"],
+        "username": user["username"],
+        "user_avatar": user.get("avatar"),
+        "channel_name": channel_name,
+        "title": stream_data.title,
+        "description": stream_data.description,
+        "category": stream_data.category,
+        "viewer_count": 0,
+        "status": "live",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "ended_at": None
+    }
+    
+    await db.live_streams.insert_one(stream_doc)
+    
+    # Generate token for broadcaster
+    token_request = AgoraTokenRequest(channel_name=channel_name, uid=int(user["id"][:8], 16) % 2147483647, role="publisher")
+    token_response = await generate_agora_token(token_request, authorization)
+    
+    return {
+        **LiveStream(**stream_doc).dict(),
+        "agora_token": token_response["token"],
+        "agora_app_id": token_response["app_id"]
+    }
+
+@api_router.put("/live/{stream_id}/end")
+async def end_live_stream(stream_id: str, authorization: Optional[str] = Header(None)):
+    """End a live stream."""
+    user = await get_current_user(authorization)
+    
+    stream = await db.live_streams.find_one({"id": stream_id})
+    if not stream:
+        raise HTTPException(status_code=404, detail="Stream not found")
+    
+    if stream["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    await db.live_streams.update_one(
+        {"id": stream_id},
+        {"$set": {
+            "status": "ended",
+            "ended_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
+    return {"message": "Stream ended"}
+
+@api_router.get("/live/active")
+async def get_active_streams(skip: int = 0, limit: int = 20):
+    """Get all active live streams."""
+    streams = await db.live_streams.find(
+        {"status": "live"},
+        {"_id": 0}
+    ).sort("started_at", -1).skip(skip).limit(limit).to_list(limit)
+    return streams
+
+@api_router.get("/live/{stream_id}")
+async def get_stream(stream_id: str):
+    """Get stream details."""
+    stream = await db.live_streams.find_one({"id": stream_id}, {"_id": 0})
+    if not stream:
+        raise HTTPException(status_code=404, detail="Stream not found")
+    return stream
+
+@api_router.put("/live/{stream_id}/viewer-count")
+async def update_viewer_count(stream_id: str, count: int):
+    """Update viewer count for a stream."""
+    await db.live_streams.update_one(
+        {"id": stream_id},
+        {"$set": {"viewer_count": count}}
+    )
+    return {"message": "Viewer count updated"}
+
+# ============= PRIVACY SETTINGS ROUTES =============
+
+@api_router.get("/users/me/privacy")
+async def get_privacy_settings(authorization: Optional[str] = Header(None)):
+    """Get user's privacy settings."""
+    user = await get_current_user(authorization)
+    
+    privacy = user.get("privacy_settings", {})
+    return PrivacySettings(**privacy) if privacy else PrivacySettings()
+
+@api_router.put("/users/me/privacy")
+async def update_privacy_settings(
+    settings: PrivacySettings,
+    authorization: Optional[str] = Header(None)
+):
+    """Update user's privacy settings."""
+    user = await get_current_user(authorization)
+    
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"privacy_settings": settings.dict()}}
+    )
+    
+    return {"message": "Privacy settings updated", "settings": settings}
+
+@api_router.put("/users/me/profile-extended")
+async def update_extended_profile(
+    phone: Optional[str] = None,
+    birthday: Optional[str] = None,
+    location: Optional[str] = None,
+    authorization: Optional[str] = Header(None)
+):
+    """Update extended user profile information."""
+    user = await get_current_user(authorization)
+    
+    update_data = {}
+    if phone is not None:
+        update_data["phone"] = phone
+    if birthday is not None:
+        update_data["birthday"] = birthday
+    if location is not None:
+        update_data["location"] = location
+    
+    if update_data:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": update_data}
+        )
+    
+    return {"message": "Profile updated"}
+
