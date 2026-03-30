@@ -1,0 +1,158 @@
+{
+  "project_name": "Next-Gen Hybrid Social Ecosystem",
+  "theme": "dark",
+  "archetype": "5 (Jewel & Luxury / Cinematic)",
+  "design_philosophy": {
+    "core_principles": [
+      "Video as Hero: The UI gets out of the way. Deep Obsidian backgrounds to make colors pop and reduce eye strain (OLED friendly).",
+      "Control Room Precision: Monetization dashboards use dense, data-rich bento grids with high contrast.",
+      "Tactile Trust: Financial actions (tipping, fundraising, payouts) feel solid, grounded, and secure with neumorphic borders and sharp Emerald accents.",
+      "Cinematic Polish: Heavy use of crystal glassmorphism for overlays and floating navigation."
+    ],
+    "forbidden_patterns": [
+      "No center-everything symmetry. Use dynamic asymmetry in profiles.",
+      "No muddy greys. All greys must be tinted with blue/slate.",
+      "No flat overlays on videos. Use gradient masks to maintain video visibility.",
+      "No Inter or generic sans for headings. Use Outfit for tech-forward personality."
+    ]
+  },
+  "typography": {
+    "fonts": {
+      "headings": {
+        "family": "Outfit",
+        "weights": ["light", "regular", "semibold", "bold", "black"],
+        "css_import": "@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;900&display=swap');"
+      },
+      "body": {
+        "family": "Manrope",
+        "weights": ["regular", "medium", "semibold"],
+        "css_import": "@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600&display=swap');"
+      }
+    },
+    "scales": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tight leading-none",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight leading-none",
+      "h3": "text-xl sm:text-2xl tracking-tight leading-tight",
+      "h4": "text-lg sm:text-xl font-semibold leading-snug",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm leading-normal",
+      "overline": "text-xs uppercase tracking-[0.2em] font-semibold"
+    }
+  },
+  "colors": {
+    "background": {
+      "base": "#0A0A0A",
+      "surface": "#141414",
+      "surface_elevated": "#1C1C1E"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A0A0A5",
+      "muted": "#707075",
+      "inverse": "#000000"
+    },
+    "primary": {
+      "default": "#10B981",
+      "hover": "#059669",
+      "foreground": "#000000",
+      "usage": "Monetization CTAs, tips, progress bars, verification checkmarks"
+    },
+    "secondary": {
+      "default": "#F43F5E",
+      "hover": "#E11D48",
+      "foreground": "#FFFFFF",
+      "usage": "Live indicators, notifications, God-Mode alerts"
+    },
+    "borders": {
+      "subtle": "rgba(255, 255, 255, 0.08)",
+      "focus": "rgba(16, 185, 129, 0.5)"
+    }
+  },
+  "spacing_and_layout": {
+    "scale": {
+      "xs": "p-2",
+      "sm": "p-4",
+      "md": "p-6",
+      "lg": "p-8",
+      "xl": "p-12",
+      "2xl": "p-16"
+    },
+    "grids": {
+      "dashboard_control_room": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+      "profile_tetris": "grid grid-cols-1 md:grid-cols-8 lg:grid-cols-12 gap-8"
+    },
+    "containers": {
+      "feed": "w-full max-w-[500px] mx-auto h-[100dvh] snap-y snap-mandatory relative",
+      "dashboard": "max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12"
+    }
+  },
+  "surfaces_and_effects": {
+    "glassmorphism": {
+      "classes": "bg-black/60 backdrop-blur-xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.4)]",
+      "usage": "Floating headers over video feed, Bottom navigation, Tip modals"
+    },
+    "neumorphism_dark": {
+      "classes": "bg-[#141414] border border-white/5 shadow-[0_4px_12px_rgba(0,0,0,0.5)] rounded-2xl",
+      "usage": "Analytics cards, Payment history, Verification panel"
+    },
+    "video_gradient_mask": {
+      "classes": "bg-gradient-to-t from-black/80 via-black/40 to-transparent",
+      "usage": "Overlay at the bottom of 9:16 videos to ensure caption readability"
+    }
+  },
+  "components_strategy": {
+    "buttons": {
+      "primary": "bg-[#10B981] text-black font-semibold rounded-full px-6 py-3 hover:bg-[#059669] transition-all duration-300 transform active:scale-95",
+      "secondary": "bg-white/10 text-white font-medium rounded-full px-6 py-3 hover:bg-white/20 transition-all border border-white/5",
+      "icon_floating": "p-3 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-white hover:bg-black/60 transition-colors"
+    },
+    "inputs": {
+      "default": "bg-[#141414] border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-[#10B981] focus:border-transparent placeholder-white/30"
+    },
+    "cards": {
+      "metric": "p-6 bg-[#141414] border-l-2 border-l-[#10B981] border-t border-r border-b border-white/5 rounded-xl flex flex-col gap-2"
+    }
+  },
+  "animations": {
+    "interactions": "Transition on all hover states: transition-all duration-200 ease-in-out.",
+    "feed_swipe": "Use Framer Motion for vertical snap scrolling. Ensure smooth momentum and instant buffering (simulated).",
+    "modals": "Slide up from bottom with subtle scale-down of background feed. Framer Motion: { initial: { y: '100%' }, animate: { y: 0 } }"
+  },
+  "media": {
+    "hero_backgrounds": [
+      {
+        "url": "https://static.prod-images.emergentagent.com/jobs/e079eadd-5e20-4760-89c0-3b489820621d/images/c23fd5c33d2cd6ad99a772a889e60b46f775f4075c24f07bcf054271c7a58af2.png",
+        "description": "Cinematic dark mode abstract background, deep midnight blue and slate textures. Use for Auth / Login or Web landing page."
+      },
+      {
+        "url": "https://static.prod-images.emergentagent.com/jobs/e079eadd-5e20-4760-89c0-3b489820621d/images/90fc2ad55bc80c45d9f0e9807b1ed43a1b4d29b75b5414a53166c743bff0b48f.png",
+        "description": "High-end elegant UI texture, frosted glass and dark obsidian tones. Use as a subtle background pattern for the Creator Dashboard."
+      }
+    ],
+    "user_avatars": [
+      {
+        "url": "https://images.unsplash.com/photo-1758486190195-dd677b21e00f?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTV8MHwxfHNlYXJjaHwxfHxjcmVhdG9yJTIwcG9ydHJhaXQlMjBtb29keSUyMGxpZ2h0aW5nfGVufDB8fHx8MTc3NDY5Njc3M3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Creator Avatar 1"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1759771716152-565fca0fb35e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTV8MHwxfHNlYXJjaHw0fHxjcmVhdG9yJTIwcG9ydHJhaXQlMjBtb29keSUyMGxpZ2h0aW5nfGVufDB8fHx8MTc3NDY5Njc3M3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Creator Avatar 2"
+      }
+    ],
+    "feed_video_placeholders": [
+      {
+        "url": "https://images.pexels.com/photos/7242798/pexels-photo-7242798.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Vertical Video Placeholder - Use this image with object-cover inside a 9:16 container to simulate the video feed."
+      },
+      {
+        "url": "https://images.pexels.com/photos/15148384/pexels-photo-15148384.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Vertical Video Placeholder 2"
+      }
+    ]
+  },
+  "technical_requirements": {
+    "testing": "All interactive elements MUST include data-testid attribute.",
+    "icons": "Use lucide-react or @phosphor-icons/react for premium duotone weight in the dashboard.",
+    "charts": "Use Recharts customized with deep backgrounds, removing grid lines, using #10B981 for growth lines, and adding dropshadows for data points."
+  }
+}
