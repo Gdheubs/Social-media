@@ -15,7 +15,7 @@ import jwt
 import time
 import cloudinary
 import cloudinary.utils
-from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
+import stripe
 import socketio
 import asyncio
 from openai import AsyncOpenAI
@@ -38,7 +38,7 @@ cloudinary.config(
 )
 
 # Stripe config
-stripe_api_key = os.environ.get('STRIPE_API_KEY')
+stripe.api_key = os.environ.get('STRIPE_API_KEY')
 
 # OpenAI config for moderation
 openai_client = AsyncOpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
@@ -813,89 +813,102 @@ async def initiate_tip(
     success_url = f"{origin}/tip-success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/feed"
     
-    # Initialize Stripe
-    host_url = str(request.base_url)
-    webhook_url = f"{host_url}api/webhook/stripe"
-    stripe_checkout = StripeCheckout(api_key=stripe_api_key, webhook_url=webhook_url)
-    
-    checkout_request = CheckoutSessionRequest(
-        amount=tip_data.amount,
-        currency="usd",
-        success_url=success_url,
-        cancel_url=cancel_url,
-        metadata={
-            "type": "tip",
+    try:
+        # Create Stripe checkout session
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'usd',
+                    'unit_amount': int(tip_data.amount * 100),  # Convert to cents
+                    'product_data': {
+                        'name': f'Tip for video: {video["title"]}',
+                        'description': f'Support {video["username"]}',
+                    },
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                "type": "tip",
+                "from_user_id": user["id"],
+                "to_user_id": video["user_id"],
+                "video_id": tip_data.video_id
+            }
+        )
+        
+        # Create payment transaction record
+        transaction_doc = {
+            "id": str(uuid.uuid4()),
+            "session_id": session.id,
             "from_user_id": user["id"],
             "to_user_id": video["user_id"],
-            "video_id": tip_data.video_id
+            "video_id": tip_data.video_id,
+            "amount": tip_data.amount,
+            "currency": "usd",
+            "type": "tip",
+            "payment_status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat()
         }
-    )
-    
-    session = await stripe_checkout.create_checkout_session(checkout_request)
-    
-    # Create payment transaction record
-    transaction_doc = {
-        "id": str(uuid.uuid4()),
-        "session_id": session.session_id,
-        "from_user_id": user["id"],
-        "to_user_id": video["user_id"],
-        "video_id": tip_data.video_id,
-        "amount": tip_data.amount,
-        "currency": "usd",
-        "type": "tip",
-        "payment_status": "pending",
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
-    
-    await db.payment_transactions.insert_one(transaction_doc)
-    
-    return {"checkout_url": session.url, "session_id": session.session_id}
+        
+        await db.payment_transactions.insert_one(transaction_doc)
+        
+        return {"checkout_url": session.url, "session_id": session.id}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create checkout session: {str(e)}")
 
 @api_router.get("/tips/status/{session_id}")
-async def get_tip_status(session_id: str, request: Request):
-    host_url = str(request.base_url)
-    webhook_url = f"{host_url}api/webhook/stripe"
-    stripe_checkout = StripeCheckout(api_key=stripe_api_key, webhook_url=webhook_url)
-    
-    status = await stripe_checkout.get_checkout_status(session_id)
-    
-    # Update transaction in database
-    transaction = await db.payment_transactions.find_one({"session_id": session_id})
-    
-    if transaction and transaction["payment_status"] != "completed" and status.payment_status == "paid":
-        # Update transaction status
-        await db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": "completed"}}
-        )
+async def get_tip_status(session_id: str):
+    try:
+        # Get Stripe session
+        session = stripe.checkout.Session.retrieve(session_id)
         
-        # Credit creator's wallet
-        platform_fee = transaction["amount"] * 0.05  # 5% platform fee
-        creator_amount = transaction["amount"] - platform_fee
+        # Update transaction in database
+        transaction = await db.payment_transactions.find_one({"session_id": session_id})
         
-        await db.users.update_one(
-            {"id": transaction["to_user_id"]},
-            {"$inc": {"wallet_balance": creator_amount}}
-        )
-        
-        # Update video tips
-        await db.videos.update_one(
-            {"id": transaction["video_id"]},
-            {"$inc": {"tips_received": creator_amount}}
-        )
-        
-        # Create notification for creator
-        video = await db.videos.find_one({"id": transaction["video_id"]})
-        tipper = await db.users.find_one({"id": transaction["from_user_id"]})
-        if video and tipper:
-            await create_notification(
-                transaction["to_user_id"],
-                "tip",
-                f'{tipper["username"]} tipped ${creator_amount:.2f} on your video "{video["title"]}"',
-                f"/wallet"
+        if transaction and transaction["payment_status"] != "completed" and session.payment_status == "paid":
+            # Update transaction status
+            await db.payment_transactions.update_one(
+                {"session_id": session_id},
+                {"$set": {"payment_status": "completed"}}
             )
-    
-    return status
+            
+            # Credit creator's wallet
+            platform_fee = transaction["amount"] * 0.05  # 5% platform fee
+            creator_amount = transaction["amount"] - platform_fee
+            
+            await db.users.update_one(
+                {"id": transaction["to_user_id"]},
+                {"$inc": {"wallet_balance": creator_amount}}
+            )
+            
+            # Update video tips
+            await db.videos.update_one(
+                {"id": transaction["video_id"]},
+                {"$inc": {"tips_received": creator_amount}}
+            )
+            
+            # Create notification for creator
+            video = await db.videos.find_one({"id": transaction["video_id"]})
+            tipper = await db.users.find_one({"id": transaction["from_user_id"]})
+            if video and tipper:
+                await create_notification(
+                    transaction["to_user_id"],
+                    "tip",
+                    f'{tipper["username"]} tipped ${creator_amount:.2f} on your video "{video["title"]}"',
+                    f"/wallet"
+                )
+        
+        return {
+            "payment_status": session.payment_status,
+            "status": session.status
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get session status: {str(e)}")
 
 # ============= FUNDRAISER ROUTES =============
 
